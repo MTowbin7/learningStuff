@@ -1,0 +1,252 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Template for setting up a Single App",
+  "Parameters":{
+    "paramEnvironment": {
+  			"Type": "String",
+  			"Description": "Is this production, staging, test or development?",
+  			"Default": "development",
+  			"AllowedValues": [
+  				"production",
+  				"test",
+  				"development"
+  			],
+  			"ConstraintDescription": "Can contain only ASCII characters."
+      },
+    "paramInstanceType": {
+        "Type": "String",
+        "Description": "What instace size do you want to use?",
+        "Default": "t2.micro",
+        "MinLength" : "4",
+        "MaxLength" : "100",
+        "AllowedPattern" : "[a-zA-Z]{1}[0-9]{1}.[a-zA-Z]*",
+        "ConstraintDescription": "Can contain only ASCII characters."
+      },
+    "paramKeyValue": {
+        "Type": "String",
+        "Description": "What Key do you want assosicated with the Application",
+        "Default": "web_key",
+        "AllowedValues": [
+          "web_key",
+          "app_key",
+          "db_key"
+        ],
+        "ConstraintDescription": "Can contain only ASCII characters."
+      },
+      "paramAMI": {
+          "Type": "String",
+          "Description": "What AMI are you using?",
+          "Default": "",
+          "MinLength" : "1",
+          "MaxLength" : "255",
+          "AllowedPattern" : "ami-[a-zA-Z0-9]*",
+          "ConstraintDescription": "Can contain only ASCII characters."
+      },
+      "paramCFStack": {
+          "Description": "Name of an active CloudFormation stack that contains the networking resources that will be used in this stack.",
+          "Type": "String",
+          "Default": "Development",
+          "MinLength" : "1",
+          "MaxLength" : "255",
+          "AllowedPattern" : "[a-zA-Z0-9]*"
+        },
+      "paramAppType": {
+          "Description": "What type of Application is this?",
+          "Type": "String",
+          "Default": "Web",
+          "AllowedValues": [
+            "Web",
+            "App",
+            "DB"
+          ],
+          "AllowedPattern" : "[a-zA-Z0-9]*"
+        },
+        "paramIAMProfile": {
+            "Description": "What type of Application is this?",
+            "Type": "String",
+            "Default": "profileWeb",
+            "AllowedValues": [
+              "profileWeb",
+              "profileApp",
+              "profileDb"
+            ],
+            "AllowedPattern" : "[a-zA-Z0-9]*"
+          }
+  },
+  "Conditions" : {
+   "conCreateWebResources" : {"Fn::Equals" : [{"Ref" : "paramAppType"}, "Web"]},
+   "conCreateAppResources" : {"Fn::Equals" : [{"Ref" : "paramAppType"}, "App"]},
+   "conCreateDBResources" : {"Fn::Equals" : [{"Ref" : "paramAppType"}, "DB"]}
+  },
+
+  "Resources": {
+  "resLambdaExecutionRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": ["lambda.amazonaws.com"]},
+                "Action": ["sts:AssumeRole"]
+            }]
+          },
+          "Path": "/",
+          "Policies": [{
+            "PolicyName": "root",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [{
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
+                  "Resource": "arn:aws:logs:*:*:*"
+              },
+              {
+                  "Effect": "Allow",
+                  "Action": ["cloudformation:DescribeStacks"],
+                  "Resource": "*"
+              }]
+            }
+          }]
+        }
+      },
+    "resLookupStackOutputs": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Handler": "index.handler",
+        "Role": { "Fn::GetAtt" : ["resLambdaExecutionRole", "Arn"] },
+        "Code": {
+          "ZipFile":  { "Fn::Join": ["\n", [
+            "var response = require('cfn-response');",
+            "exports.handler = function(event, context) {",
+            "    console.log('REQUEST RECEIVED:\\n', JSON.stringify(event));",
+            "    if (event.RequestType == 'Delete') {",
+            "        response.send(event, context, response.SUCCESS);",
+            "        return;",
+            "    }",
+            "    var stackName = event.ResourceProperties.StackName;",
+            "    var responseData = {};",
+            "    if (stackName) {",
+            "        var aws = require('aws-sdk');",
+            "        var cfn = new aws.CloudFormation();",
+            "        cfn.describeStacks({StackName: stackName}, function(err, data) {",
+            "            if (err) {",
+            "                responseData = {Error: 'DescribeStacks call failed'};",
+            "                console.log(responseData.Error + ':\\n', err);",
+            "                response.send(event, context, response.FAILED, responseData);",
+            "            }",
+            "            else {",
+            "                data.Stacks[0].Outputs.forEach(function(output) {",
+            "                    responseData[output.OutputKey] = output.OutputValue;",
+            "                });",
+            "                response.send(event, context, response.SUCCESS, responseData);",
+            "            }",
+            "        });",
+            "    } else {",
+            "        responseData = {Error: 'Stack name not specified'};",
+            "        console.log(responseData.Error);",
+            "        response.send(event, context, response.FAILED, responseData);",
+            "    }",
+            "};"
+          ]]}
+        },
+        "Runtime": "nodejs",
+        "Timeout": "30"
+      }
+    },
+  "resCloudFormationIAMInfo": {
+    "Type": "Custom::NetworkInfo",
+    "Properties": {
+      "ServiceToken": { "Fn::GetAtt" : ["resLookupStackOutputs", "Arn"] },
+      "StackName": "IAM-Roles"
+      }
+  },
+  "resCloudFormationInfo": {
+    "Type": "Custom::NetworkInfo",
+    "Properties": {
+      "ServiceToken": { "Fn::GetAtt" : ["resLookupStackOutputs", "Arn"] },
+      "StackName": {"Ref": "paramCFStack"}
+      }
+  },
+  "resElasticLoadBalancer" : {
+    "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+    "Properties" : {
+      "Listeners": [ {
+        "LoadBalancerPort" : "80",
+        "InstancePort" :  "80" ,
+        "Protocol" : "TCP"
+        } ],
+      "SecurityGroups":
+        [{ "Fn::If" : [ "conCreateWebResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "WebSecurityGroup" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateAppResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "AppSecurityGroup" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateDBResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "DBSecurityGroup" ]}, { "Ref": "AWS::NoValue"} ]}],
+      "Subnets":
+        [{ "Fn::If" : [ "conCreateWebResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PublicDMZSubnetA" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateWebResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PublicDMZSubnetB" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateAppResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateAPPSubnetA" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateAppResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateAPPSubnetB" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateDBResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateDBSubnetA" ]}, { "Ref": "AWS::NoValue"} ]},
+         { "Fn::If" : [ "conCreateDBResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateDBSubnetB" ]}, { "Ref": "AWS::NoValue"} ]}],
+      "LoadBalancerName": { "Ref": "AWS::StackName" },
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": { "Ref": "AWS::StackName" }
+        }
+      ]
+    }
+  },
+  "resLaunchConfig": {
+    "Type" : "AWS::AutoScaling::LaunchConfiguration",
+    "Properties" : {
+      "IamInstanceProfile": { "Fn::GetAtt": [ "resCloudFormationIAMInfo", { "Ref": "paramIAMProfile"} ]},
+      "ImageId" : { "Ref": "paramAMI"},
+      "InstanceType" : { "Ref": "paramInstanceType"},
+      "InstanceMonitoring" : "true",
+      "KeyName" : { "Ref": "paramKeyValue"},
+      "SecurityGroups":
+      [{ "Fn::If" : [ "conCreateWebResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "WebSecurityGroup" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateAppResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "AppSecurityGroup" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateDBResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "DBSecurityGroup" ]}, { "Ref": "AWS::NoValue"} ]}]
+    }
+  },
+  "resAutoScaling":{
+    "Type" : "AWS::AutoScaling::AutoScalingGroup",
+    "Properties" : {
+      "DesiredCapacity" : { "Fn::If" : [ "conCreateWebResources", "2", "1" ]},
+      "MaxSize" : { "Fn::If" : [ "conCreateWebResources", "2", "1" ]},
+      "MinSize" : { "Fn::If" : [ "conCreateWebResources", "2", "1" ]},
+      "LaunchConfigurationName" : { "Ref": "resLaunchConfig"},
+      "VPCZoneIdentifier":
+      [{ "Fn::If" : [ "conCreateWebResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PublicDMZSubnetA" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateWebResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PublicDMZSubnetB" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateAppResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateAPPSubnetA" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateAppResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateAPPSubnetB" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateDBResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateDBSubnetA" ]}, { "Ref": "AWS::NoValue"} ]},
+       { "Fn::If" : [ "conCreateDBResources", { "Fn::GetAtt": [ "resCloudFormationInfo", "PrivateDBSubnetB" ]}, { "Ref": "AWS::NoValue"} ]}],
+      "HealthCheckType": "EC2",
+      "LoadBalancerNames" : [ { "Ref": "resElasticLoadBalancer"} ],
+      "Tags": [{
+          "Key": "Name",
+          "Value": { "Ref": "AWS::StackName" },
+          "PropagateAtLaunch": "true"
+        }
+      ]
+    }
+  }
+  },
+  "Outputs": {
+    "AutoScalingID":{
+      "Description": "AutoScaling ID",
+      "Value": {"Ref":"resAutoScaling"}
+    },
+    "LaunchConfigID":{
+      "Description": "Launch Config ID",
+      "Value": {"Ref":"resLaunchConfig"}
+    },
+    "ElasticLoadBalancerID":{
+      "Description": "Elastic Load Balancer ID",
+      "Value": {"Ref":"resElasticLoadBalancer"}
+    }
+  }
+}
